@@ -43,6 +43,11 @@ users = Table(
     Column("lt_fraction", Float),
     Column("pw_salt", Text),                          # per-user password salt
     Column("pw_hash", Text),                          # PBKDF2-HMAC-SHA256 hash
+    # Running location (for the sun/solar-radiation geometry).
+    Column("city", Text),
+    Column("lat", Float),
+    Column("lon", Float),
+    Column("tz", Text),                               # IANA timezone name
 )
 
 sessions = Table(
@@ -97,6 +102,10 @@ def init_db():
     _add_column_if_missing(eng, "sessions", "time_of_day", "TEXT")
     _add_column_if_missing(eng, "users", "pw_salt", "TEXT")
     _add_column_if_missing(eng, "users", "pw_hash", "TEXT")
+    _add_column_if_missing(eng, "users", "city", "TEXT")
+    _add_column_if_missing(eng, "users", "lat", "DOUBLE PRECISION")
+    _add_column_if_missing(eng, "users", "lon", "DOUBLE PRECISION")
+    _add_column_if_missing(eng, "users", "tz", "TEXT")
 
 
 def _add_column_if_missing(eng, table: str, column: str, sql_type: str):
@@ -150,9 +159,10 @@ def get_user_by_name(name: str) -> dict | None:
         return dict(r._mapping) if r else None
 
 
-def create_user(name: str, password: str) -> int:
-    """Create a profile from just a name + password. No baseline is asked for;
-    the model anchors itself from the sessions the user logs later.
+def create_user(name: str, password: str, city: str, lat: float, lon: float,
+                tz: str) -> int:
+    """Create a profile from name + password + chosen running location. No
+    baseline is asked for; the model anchors itself from the logged sessions.
 
     The baseline_* columns are vestigial (the model ignores them), but older
     databases were created with a NOT NULL constraint on them, so we write
@@ -166,7 +176,8 @@ def create_user(name: str, password: str) -> int:
             created=datetime.now().isoformat(timespec="seconds"),
             baseline_pace=240.0, baseline_type="vo2max",
             lt_fraction=phys.DEFAULT_LT_FRACTION,
-            pw_salt=salt, pw_hash=h))
+            pw_salt=salt, pw_hash=h,
+            city=city, lat=lat, lon=lon, tz=tz))
         return int(res.inserted_primary_key[0])
 
 

@@ -23,9 +23,10 @@ python3 -m venv .venv
 
 ## How to use it
 
-1. **Create a profile**: just pick a name + password — no fitness numbers
-   needed. Next time you **log in** by name + password. Profiles are private and
-   not listed; each person's heat response and fitness are learned separately.
+1. **Create a profile**: pick a name + password and the city closest to where
+   you run (used only for the sun's position). No fitness numbers needed. Next
+   time you **log in** by name + password. Profiles are private and not listed;
+   each person's heat response and fitness are learned separately.
 2. **Log session** after each interval workout: date, time, type, average pace,
    and the weather (temperature, sky, rain, humidity). Your very first session
    is what the model takes its starting point from — log one before predicting.
@@ -63,10 +64,11 @@ log v  =  fitness(date)                # slow latent random walk
   physiological constants); the model only learns your overall heat sensitivity
   (two coefficients), which keeps it estimable on ~50 sessions.
 * **Solar radiation by time of day**: the sun's elevation is computed from the
-  date and clock time at a fixed location (**Stuttgart, Germany**) and added as
-  radiant heat load, scaled by cloud cover — so a noon run loads more than an
-  evening run at the same air temperature. Time of day is optional (older
-  sessions fall back to a mid-day estimate) and can be edited per session.
+  date, clock time and **your chosen city** (latitude/longitude/timezone) and
+  added as radiant heat load, scaled by cloud cover — so a noon run loads more
+  than an evening run at the same air temperature, and a low-latitude city gets
+  more sun than a high-latitude one. Time of day is optional (older sessions
+  fall back to a mid-day estimate) and can be edited per session.
 
 This is your state-space model written in its batch (smoother) form. Because
 every term is linear-Gaussian, inference is the exact posterior of a Bayesian

@@ -96,6 +96,9 @@ class ModelConfig:
 
     z: float = 1.0                     # interval half-width (1 sd ~ 68%)
 
+    # The user's running location (drives the sun/solar-radiation geometry).
+    location: phys.Location = phys.DEFAULT_LOCATION
+
 
 # Index of the three regression coefficients within the parameter vector,
 # *relative to the end* (the K fitness nodes come first).
@@ -104,6 +107,7 @@ _B1, _B2, _BR = -3, -2, -1
 
 def config_from_sessions(sessions: list[dict],
                          lt_fraction: float = phys.DEFAULT_LT_FRACTION,
+                         location: phys.Location = phys.DEFAULT_LOCATION,
                          **overrides) -> ModelConfig:
     """Build a ModelConfig whose fitness anchor is read off the sessions.
 
@@ -114,7 +118,8 @@ def config_from_sessions(sessions: list[dict],
     back to a generic recreational pace so the prior stays proper.
 
     `lt_fraction` only seeds the threshold-offset prior `betar_mean`; the offset
-    itself is re-estimated from the data (the `beta_r` parameter).
+    itself is re-estimated from the data (the `beta_r` parameter).  `location`
+    is the user's city, used for the sun geometry in the heat correction.
     """
     betar_mean = float(np.log(lt_fraction))
     if not sessions:
@@ -124,7 +129,7 @@ def config_from_sessions(sessions: list[dict],
         b1, b2 = ModelConfig.beta1_mean, ModelConfig.beta2_mean
         vals = []
         for s in sessions:
-            w = phys.Weather.from_row(s)
+            w = phys.Weather.from_row(s, loc=location)
             p1, p2 = phys.heat_penalty_basis(w)
             ideal = phys.pace_to_logv(s["pace_sec"]) - (b1 * p1 + b2 * p2)
             if s["session_type"] == "threshold":
@@ -134,6 +139,7 @@ def config_from_sessions(sessions: list[dict],
     return ModelConfig(
         baseline_logv=baseline_logv,
         betar_mean=betar_mean,
+        location=location,
         **overrides,
     )
 
@@ -275,7 +281,7 @@ def fit(sessions: list[dict], cfg: ModelConfig) -> FitResult:
     thr = np.empty(len(sessions))
     y = np.empty(len(sessions))
     for i, s in enumerate(sessions):
-        w = phys.Weather.from_row(s)
+        w = phys.Weather.from_row(s, loc=cfg.location)
         p1, p2 = phys.heat_penalty_basis(w)
         P1[i], P2[i] = p1, p2
         thr[i] = 1.0 if s["session_type"] == "threshold" else 0.0
@@ -406,7 +412,8 @@ def predict(fit_res: FitResult, target_date: date, weather: phys.Weather):
 
     # Heat slowdown relative to ideal conditions, at current fitness.
     ideal = phys.Weather(temp_c=phys.THERMAL_OPTIMUM_C, sky="overcast",
-                         rain="none", humidity=phys.HUMIDITY_REF)
+                         rain="none", humidity=phys.HUMIDITY_REF,
+                         loc=fit_res.config.location)
     m_now, _ = _predict_logv(fit_res, target_day, *phys.heat_penalty_basis(weather), False)
     m_ideal, _ = _predict_logv(fit_res, target_day, *phys.heat_penalty_basis(ideal), False)
     out["heat_slowdown_pct"] = 100.0 * (1.0 - np.exp(m_now - m_ideal))
@@ -440,7 +447,7 @@ def heat_curve(fit_res: FitResult, target_date: date,
     vo2, thr = [], []
     for t in temps:
         w = phys.Weather(temp_c=float(t), sky=sky, rain=rain, humidity=humidity,
-                         date=target_date, time=tod)
+                         date=target_date, time=tod, loc=fit_res.config.location)
         p = predict(fit_res, target_date, w)
         vo2.append(p["vo2max"]["pace_sec"])
         thr.append(p["threshold"]["pace_sec"])
@@ -472,7 +479,7 @@ def weather_normalized_paces(fit_res: FitResult, sessions: list[dict]):
     b1, b2, br = fit_res.mean[_B1], fit_res.mean[_B2], fit_res.mean[_BR]
     days, paces = [], []
     for s in sessions:
-        w = phys.Weather.from_row(s)
+        w = phys.Weather.from_row(s, loc=fit_res.config.location)
         p1, p2 = phys.heat_penalty_basis(w)
         logv = phys.pace_to_logv(s["pace_sec"])
         ideal = logv - (b1 * p1 + b2 * p2)

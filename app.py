@@ -106,21 +106,23 @@ def invalidate_data():
 
 
 @st.cache_data(show_spinner=False)
-def get_fit(user_sig, sessions):
+def get_fit(user_sig, sessions, _loc):
     # The model anchors itself from the sessions -- no user baseline needed.
-    cfg = M.config_from_sessions(sessions)
+    # _loc (leading underscore) is passed through but not part of the cache key;
+    # the location is already captured in user_sig.
+    cfg = M.config_from_sessions(sessions, location=_loc)
     return M.fit(sessions, cfg)
 
 
-def fit_for_user(user):
+def fit_for_user(user, loc):
     sessions = load_sessions(user["id"])
-    # Signature covers pace/weather/time of every session so any edit
-    # invalidates the cache.
-    sig = (user["id"], len(sessions),
+    # Signature covers pace/weather/time of every session (so any edit
+    # invalidates the cache) plus the location.
+    sig = (user["id"], len(sessions), (loc.lat, loc.lon, loc.tz),
            tuple((s["id"], s.get("time"), s["pace_sec"], s["session_type"],
                   s["temp_c"], s["sky"], s["rain"], s["humidity"])
                  for s in sessions))
-    return get_fit(sig, sessions), sessions
+    return get_fit(sig, sessions, loc), sessions
 
 
 def type_label(t: str) -> str:
@@ -170,29 +172,29 @@ def login_screen():
             ok = st.form_submit_button("Log in", type="primary")
         if ok:
             u = storage.get_user_by_name(name)
-            if u is None:
-                st.error(INCORRECT)
-            elif not u["pw_hash"]:
-                # Legacy profile created before passwords existed: claim it by
-                # setting this password now.
-                storage.set_user_password(u["id"], pw)
-                st.session_state.auth_uid = u["id"]
-                st.rerun()
-            elif storage.verify_password(u, pw):
+            if u is not None and storage.verify_password(u, pw):
                 st.session_state.auth_uid = u["id"]
                 st.rerun()
             else:
+                # Generic message; verify_password also fails closed for any
+                # profile that has no password set.
                 st.error(INCORRECT)
 
     with tab_create:
-        st.caption("Just pick a name and a password. No fitness numbers needed — "
-                   "after you log in, log your first interval session and the "
-                   "model takes its starting point from there.")
+        st.caption("Just pick a name, a password, and the city closest to where "
+                   "you run. No fitness numbers needed — after you log in, log "
+                   "your first session and the model starts from there.")
         with st.form("create"):
             name = st.text_input("Choose a profile name", key="cr_name")
             c1, c2 = st.columns(2)
             pw1 = c1.text_input("Password", type="password", key="cr_pw1")
             pw2 = c2.text_input("Repeat password", type="password", key="cr_pw2")
+            loc = st.selectbox(
+                "Closest city", phys.CITIES, format_func=lambda c: c.name,
+                key="cr_city",
+                help="Used only for the sun's position (how much radiant heat a "
+                     "daytime run adds). Pick the nearest — exact city isn't "
+                     "critical.")
             ok = st.form_submit_button("Create profile & log in", type="primary")
         if ok:
             if not name.strip():
@@ -204,7 +206,8 @@ def login_screen():
             elif storage.get_user_by_name(name) is not None:
                 st.error("That name is taken — pick another.")
             else:
-                uid = storage.create_user(name, pw1)
+                uid = storage.create_user(name, pw1, loc.name, loc.lat, loc.lon,
+                                          loc.tz)
                 st.session_state.auth_uid = uid
                 st.rerun()
 
@@ -222,12 +225,13 @@ if user is None:                      # profile was deleted -> log out
     st.session_state.auth_uid = None
     st.rerun()
 
-fit, sessions = fit_for_user(user)
+user_loc = phys.user_location(user)
+fit, sessions = fit_for_user(user, user_loc)
 
 # Sidebar: who's logged in + log out (no list of other profiles).
 st.sidebar.title("🏃 Pace Predictor")
 st.sidebar.markdown(f"Signed in as **{user['name']}**")
-st.sidebar.caption(f"Sessions logged: **{len(sessions)}**")
+st.sidebar.caption(f"📍 {user_loc.name}  \nSessions logged: **{len(sessions)}**")
 if st.sidebar.button("Log out"):
     st.session_state.auth_uid = None
     st.rerun()
@@ -255,7 +259,7 @@ HELP_HUM = ("Relative humidity. Muggy air blocks sweat evaporation, so high "
             "that's treated as neutral (no adjustment).")
 
 
-def weather_inputs(key: str, default_temp=15.0):
+def weather_inputs(key: str, loc, default_temp=15.0):
     c1, c2 = st.columns(2)
     temp = c1.number_input("Temperature °C", -10.0, 45.0, default_temp, 0.5,
                            key=f"{key}_t", help=HELP_TEMP)
@@ -267,7 +271,7 @@ def weather_inputs(key: str, default_temp=15.0):
     # Default to the neutral reference humidity so an unknown value adds nothing.
     hum = c4.slider("Humidity %", 10, 100, int(phys.HUMIDITY_REF),
                     key=f"{key}_h", help=HELP_HUM)
-    return phys.Weather(temp_c=temp, sky=sky, rain=rain, humidity=hum)
+    return phys.Weather(temp_c=temp, sky=sky, rain=rain, humidity=hum, loc=loc)
 
 
 # ======================  PREDICT  =========================================
@@ -289,7 +293,7 @@ with tab_predict:
         t = cti.time_input("Time of day", value=dtime(18, 0), step=1800,
                            help="When you'll start. Midday sun adds more heat than "
                                 "evening sun at the same temperature.")
-        w = weather_inputs("pred", default_temp=15.0)
+        w = weather_inputs("pred", user_loc, default_temp=15.0)
         w.date, w.time = d, t
 
         pred = M.predict(fit, d, w)
@@ -383,7 +387,7 @@ with tab_log:
     space = c4.text_input("Average pace (m:ss /km)", key="log_pace",
                           help="Average pace over the working intervals, e.g. "
                                "3:45. This is the performance the model learns from.")
-    lw = weather_inputs("log", default_temp=15.0)
+    lw = weather_inputs("log", user_loc, default_temp=15.0)
     notes = st.text_input("Notes (optional)", key="log_notes",
                           help="Anything for your own reference — how it felt, "
                                "the workout structure. Not used by the model.")
@@ -538,7 +542,7 @@ with tab_insights:
 # ======================  PROFILE  =========================================
 with tab_profile:
     st.subheader("Account")
-    st.markdown(f"Signed in as **{user['name']}**.")
+    st.markdown(f"Signed in as **{user['name']}** · 📍 {user_loc.name}")
     st.caption(f"Sessions logged: **{len(sessions)}**. Nothing to set up here — "
                "the model learns your fitness and heat response directly from "
                "the sessions you log.")

@@ -22,12 +22,28 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date as dtdate, datetime, time as dttime, timezone
+from functools import lru_cache
 
 try:
     from zoneinfo import ZoneInfo
-    _TZ = ZoneInfo("Europe/Berlin")
-except Exception:  # pragma: no cover - fall back to fixed CET if tzdata missing
-    _TZ = timezone.utc
+    _HAVE_ZONEINFO = True
+except Exception:  # pragma: no cover
+    _HAVE_ZONEINFO = False
+
+
+@lru_cache(maxsize=None)
+def _zone(tz_name: str):
+    """IANA timezone name -> tzinfo, falling back to UTC if unavailable.
+
+    The `tzdata` package (in requirements) provides the database on systems
+    that lack one, so all the reference cities resolve in the cloud too.
+    """
+    if _HAVE_ZONEINFO:
+        try:
+            return ZoneInfo(tz_name)
+        except Exception:
+            pass
+    return timezone.utc
 
 # --------------------------------------------------------------------------
 # Pace <-> velocity
@@ -112,30 +128,61 @@ HUMIDITY_PER_10PCT = 1.0     # +1 C effective per 10% RH above the reference
 # noon run feels harder than an evening run at the same temperature.  We
 # compute the sun's elevation above the horizon (deterministic from location +
 # date + clock time) and turn it into an extra "effective temperature" load,
-# scaled down by cloud cover.  Location is fixed to Stuttgart, Germany.
+# scaled down by cloud cover.  The location is the user's chosen city.
 
-LATITUDE = 48.78             # Stuttgart
-LONGITUDE = 9.18             # degrees east
 K_SOLAR = 6.0                # max effective-temp add (degC) at full sun, high noon
 CLOUD_TRANSMISSION = {"sunny": 1.0, "partly cloudy": 0.5, "overcast": 0.15}
 # Used when a session has no recorded time of day (mid value ~ old fixed bump).
 LEGACY_SOLAR_FACTOR = 0.5
 
 
-def solar_elevation(d: dtdate, t: dttime) -> float:
-    """Sun elevation angle (degrees above horizon) at Stuttgart for a local
-    clock time.  Handles CET/CEST automatically via the Europe/Berlin zone.
+@dataclass(frozen=True)
+class Location:
+    """A running location: display name + coordinates + IANA timezone."""
+    name: str
+    lat: float           # degrees north
+    lon: float           # degrees east
+    tz: str              # IANA timezone name, e.g. "Europe/Berlin"
+
+
+DEFAULT_LOCATION = Location("Stuttgart, Germany", 48.78, 9.18, "Europe/Berlin")
+
+# A spread of reference cities; on sign-up a user picks the one closest to where
+# they run.  Latitude + longitude + timezone are all we need for the sun model.
+# Europe-weighted, with a few on every other continent.
+CITIES = [
+    DEFAULT_LOCATION,
+    Location("London, United Kingdom", 51.51, -0.13, "Europe/London"),
+    Location("Paris, France", 48.85, 2.35, "Europe/Paris"),
+    Location("Madrid, Spain", 40.42, -3.70, "Europe/Madrid"),
+    Location("Stockholm, Sweden", 59.33, 18.07, "Europe/Stockholm"),
+    Location("New York, USA", 40.71, -74.01, "America/New_York"),
+    Location("Los Angeles, USA", 34.05, -118.24, "America/Los_Angeles"),
+    Location("São Paulo, Brazil", -23.55, -46.63, "America/Sao_Paulo"),
+    Location("Cairo, Egypt", 30.04, 31.24, "Africa/Cairo"),
+    Location("Cape Town, South Africa", -33.92, 18.42, "Africa/Johannesburg"),
+    Location("Dubai, UAE", 25.20, 55.27, "Asia/Dubai"),
+    Location("Mumbai, India", 19.08, 72.88, "Asia/Kolkata"),
+    Location("Singapore", 1.35, 103.82, "Asia/Singapore"),
+    Location("Tokyo, Japan", 35.68, 139.69, "Asia/Tokyo"),
+    Location("Sydney, Australia", -33.87, 151.21, "Australia/Sydney"),
+]
+
+
+def solar_elevation(d: dtdate, t: dttime, loc: Location = DEFAULT_LOCATION) -> float:
+    """Sun elevation angle (degrees above horizon) for a local clock time at
+    `loc`.  Handles the location's DST automatically via its timezone.
     Negative = sun below the horizon (night)."""
-    local = datetime(d.year, d.month, d.day, t.hour, t.minute, tzinfo=_TZ)
+    local = datetime(d.year, d.month, d.day, t.hour, t.minute, tzinfo=_zone(loc.tz))
     utc = local.astimezone(timezone.utc)
     n = utc.timetuple().tm_yday
     decl = 23.45 * math.sin(math.radians(360 / 365 * (n - 81)))
     b = math.radians(360 / 364 * (n - 81))
     eot = 9.87 * math.sin(2 * b) - 7.53 * math.cos(b) - 1.5 * math.sin(b)  # minutes
     utc_h = utc.hour + utc.minute / 60 + utc.second / 3600
-    lst = utc_h + LONGITUDE / 15 + eot / 60          # local solar time (hours)
+    lst = utc_h + loc.lon / 15 + eot / 60            # local solar time (hours)
     hra = math.radians(15 * (lst - 12))               # hour angle
-    phi, dec = math.radians(LATITUDE), math.radians(decl)
+    phi, dec = math.radians(loc.lat), math.radians(decl)
     sin_elev = math.sin(phi) * math.sin(dec) + math.cos(phi) * math.cos(dec) * math.cos(hra)
     return math.degrees(math.asin(max(-1.0, min(1.0, sin_elev))))
 
@@ -151,8 +198,10 @@ def _raw_solar_load(elev_deg: float) -> float:
     return dni * s
 
 
-# Normalise so a clear summer-solstice solar noon at Stuttgart -> factor 1.0.
-_SOLAR_NORM = _raw_solar_load(90 - (LATITUDE - 23.45))
+# Fixed reference: a clear summer-solstice solar noon at mid-latitude -> 1.0.
+# Lower-latitude cities reach higher sun and saturate near 1.0 (more solar
+# load); higher-latitude cities peak below 1.0 -- the latitude effect we want.
+_SOLAR_NORM = _raw_solar_load(90 - (DEFAULT_LOCATION.lat - 23.45))
 
 
 def solar_load_factor(elev_deg: float) -> float:
@@ -165,7 +214,7 @@ def solar_bonus(w: "Weather") -> float:
     Falls back to a fixed mid-day estimate when no time of day is recorded."""
     trans = CLOUD_TRANSMISSION.get(w.sky, 0.15)
     if w.date is not None and w.time is not None:
-        factor = solar_load_factor(solar_elevation(w.date, w.time))
+        factor = solar_load_factor(solar_elevation(w.date, w.time, w.loc))
     else:
         factor = LEGACY_SOLAR_FACTOR
     return K_SOLAR * trans * factor
@@ -189,9 +238,10 @@ class Weather:
     humidity: float = 50.0
     date: dtdate | None = None    # needed for the solar term
     time: dttime | None = None
+    loc: Location = DEFAULT_LOCATION   # where the run happens (sun geometry)
 
     @classmethod
-    def from_row(cls, row: dict) -> "Weather":
+    def from_row(cls, row: dict, loc: Location = DEFAULT_LOCATION) -> "Weather":
         return cls(
             temp_c=float(row["temp_c"]),
             sky=row.get("sky", "overcast"),
@@ -199,7 +249,20 @@ class Weather:
             humidity=float(row.get("humidity", 50.0) or 50.0),
             date=row.get("date"),
             time=parse_time(row.get("time")),
+            loc=loc,
         )
+
+
+def user_location(user: dict) -> Location:
+    """Resolve a user row's stored city to a Location (Stuttgart if unset)."""
+    try:
+        lat, lon = user.get("lat"), user.get("lon")
+        if lat is not None and lon is not None:
+            return Location(user.get("city") or "—", float(lat), float(lon),
+                            user.get("tz") or DEFAULT_LOCATION.tz)
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return DEFAULT_LOCATION
 
 
 def effective_temperature(w: Weather) -> float:
