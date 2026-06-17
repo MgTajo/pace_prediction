@@ -14,13 +14,15 @@ allowlist); profiles only separate each person's data.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 from datetime import date, datetime
 from pathlib import Path
 
 from sqlalchemy import (Column, Float, ForeignKey, Integer, MetaData, Table,
-                        Text, create_engine, delete, inspect, insert, select,
-                        text, update)
+                        Text, create_engine, delete, func, inspect, insert,
+                        select, text, update)
 from sqlalchemy.exc import SQLAlchemyError
 
 import physiology as phys
@@ -37,6 +39,8 @@ users = Table(
     Column("baseline_pace", Float, nullable=False),   # sec/km in cool conditions
     Column("baseline_type", Text, nullable=False),    # 'vo2max' | 'threshold'
     Column("lt_fraction", Float, nullable=False),
+    Column("pw_salt", Text),                          # per-user password salt
+    Column("pw_hash", Text),                          # PBKDF2-HMAC-SHA256 hash
 )
 
 sessions = Table(
@@ -87,14 +91,40 @@ def init_db():
         # Tables already existing is harmless; anything else is a real problem.
         if "already exists" not in orig and "duplicate" not in orig:
             raise
-    # Migration: add time_of_day to databases created before that column.
+    # Migrations: add columns to databases created before they existed.
+    _add_column_if_missing(eng, "sessions", "time_of_day", "TEXT")
+    _add_column_if_missing(eng, "users", "pw_salt", "TEXT")
+    _add_column_if_missing(eng, "users", "pw_hash", "TEXT")
+
+
+def _add_column_if_missing(eng, table: str, column: str, sql_type: str):
     try:
-        cols = {c["name"] for c in inspect(eng).get_columns("sessions")}
-        if "time_of_day" not in cols:
+        cols = {c["name"] for c in inspect(eng).get_columns(table)}
+        if column not in cols:
             with eng.begin() as con:
-                con.execute(text("ALTER TABLE sessions ADD COLUMN time_of_day TEXT"))
+                con.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
     except SQLAlchemyError as e:
-        print(f"[init_db] migration skipped: {getattr(e, 'orig', e)!r}", flush=True)
+        print(f"[init_db] migration {table}.{column} skipped: "
+              f"{getattr(e, 'orig', e)!r}", flush=True)
+
+
+# ---- password hashing ----------------------------------------------------
+
+def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
+    """Return (salt, hash) hex strings using PBKDF2-HMAC-SHA256."""
+    if salt is None:
+        salt = os.urandom(16).hex()
+    h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                            bytes.fromhex(salt), 200_000).hex()
+    return salt, h
+
+
+def verify_password(user: dict, password: str) -> bool:
+    """Constant-time check of a password against a stored user row."""
+    if not user or not user.get("pw_salt") or not user.get("pw_hash"):
+        return False
+    _, h = _hash_password(password, user["pw_salt"])
+    return hmac.compare_digest(h, user["pw_hash"])
 
 
 def _rows(result) -> list[dict]:
@@ -103,26 +133,39 @@ def _rows(result) -> list[dict]:
 
 # ---- users ---------------------------------------------------------------
 
-def list_users() -> list[dict]:
-    with _get_engine().connect() as con:
-        return _rows(con.execute(select(users).order_by(users.c.name)))
-
-
 def get_user(user_id: int) -> dict | None:
     with _get_engine().connect() as con:
         r = con.execute(select(users).where(users.c.id == user_id)).first()
         return dict(r._mapping) if r else None
 
 
-def create_user(name: str, baseline_pace: float, baseline_type: str,
+def get_user_by_name(name: str) -> dict | None:
+    """Look up a single profile by name (case-insensitive). Used for login;
+    we never expose a list of all profiles."""
+    with _get_engine().connect() as con:
+        r = con.execute(select(users).where(
+            func.lower(users.c.name) == name.strip().lower())).first()
+        return dict(r._mapping) if r else None
+
+
+def create_user(name: str, password: str, baseline_pace: float,
+                baseline_type: str,
                 lt_fraction: float = phys.DEFAULT_LT_FRACTION) -> int:
+    salt, h = _hash_password(password)
     with _get_engine().begin() as con:
         res = con.execute(insert(users).values(
             name=name.strip(),
             created=datetime.now().isoformat(timespec="seconds"),
             baseline_pace=baseline_pace, baseline_type=baseline_type,
-            lt_fraction=lt_fraction))
+            lt_fraction=lt_fraction, pw_salt=salt, pw_hash=h))
         return int(res.inserted_primary_key[0])
+
+
+def set_user_password(user_id: int, password: str):
+    salt, h = _hash_password(password)
+    with _get_engine().begin() as con:
+        con.execute(update(users).where(users.c.id == user_id).values(
+            pw_salt=salt, pw_hash=h))
 
 
 def update_user(user_id: int, baseline_pace: float, baseline_type: str,

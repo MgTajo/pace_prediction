@@ -96,61 +96,103 @@ def pace_card(container, kind, title, p):
 
 
 # --------------------------------------------------------------------------
-# Sidebar: profile selection / creation
+# Authentication gate
 # --------------------------------------------------------------------------
+# Public app: anyone can create a profile, but each is password-protected and
+# you log in by name. We never list existing profiles (no enumeration of who
+# else has one). Login state lives in the session for this browser tab.
 
-st.sidebar.title("🏃 Pace Predictor")
-users = storage.list_users()
-names = {u["name"]: u for u in users}
+INCORRECT = "Incorrect profile name or password."
 
-choice = st.sidebar.selectbox(
-    "Profile", options=["➕ New profile…"] + list(names.keys()),
-    index=1 if users else 0,
-)
 
-if choice == "➕ New profile…":
-    st.title("Create your profile")
-    st.write(
-        "One quick calibration. Tell me a pace you can currently hold **in cool "
-        "conditions (~10–12 °C)** for one of the two interval types — that becomes "
-        "your starting fitness. Everything else is learned from the sessions you log."
-    )
-    with st.form("new_user"):
-        name = st.text_input("Name")
-        c1, c2 = st.columns(2)
-        b_type = c1.selectbox("Reference session type", ["vo2max", "threshold"],
-                              format_func=lambda x: "VO₂max intervals" if x == "vo2max" else "Threshold")
-        b_pace = c2.text_input("Pace in cool conditions (m:ss /km)", "4:00")
-        lt = st.slider(
-            "Your threshold ÷ VO₂max velocity ratio", 0.82, 0.95,
-            phys.DEFAULT_LT_FRACTION, 0.005,
-            help="Physiological link between the two paces. ~0.90 is typical; "
-                 "leave it unless you know yours. The app refines it once you've "
-                 "logged both session types.",
-        )
-        submitted = st.form_submit_button("Create profile", type="primary")
-    if submitted:
-        if not name.strip():
-            st.error("Please enter a name.")
-        elif name.strip() in names:
-            st.error("That name already exists.")
-        else:
-            try:
-                storage.create_user(name, phys.parse_pace(b_pace), b_type, lt)
-                st.success(f"Welcome, {name}! Select your profile in the sidebar.")
+def login_screen():
+    st.title("🏃 Pace Predictor")
+    tab_login, tab_create = st.tabs(["Log in", "Create profile"])
+
+    with tab_login:
+        with st.form("login"):
+            name = st.text_input("Profile name", key="li_name")
+            pw = st.text_input("Password", type="password", key="li_pw")
+            ok = st.form_submit_button("Log in", type="primary")
+        if ok:
+            u = storage.get_user_by_name(name)
+            if u is None:
+                st.error(INCORRECT)
+            elif not u["pw_hash"]:
+                # Legacy profile created before passwords existed: claim it by
+                # setting this password now.
+                storage.set_user_password(u["id"], pw)
+                st.session_state.auth_uid = u["id"]
                 st.rerun()
-            except ValueError:
-                st.error("Pace must look like 4:00 or 3:45.")
+            elif storage.verify_password(u, pw):
+                st.session_state.auth_uid = u["id"]
+                st.rerun()
+            else:
+                st.error(INCORRECT)
+
+    with tab_create:
+        st.caption("Pick a pace you can hold **in cool conditions (~10–12 °C)** "
+                   "for one interval type — that becomes your starting fitness.")
+        with st.form("create"):
+            name = st.text_input("Choose a profile name", key="cr_name")
+            c1, c2 = st.columns(2)
+            pw1 = c1.text_input("Password", type="password", key="cr_pw1")
+            pw2 = c2.text_input("Repeat password", type="password", key="cr_pw2")
+            c3, c4 = st.columns(2)
+            b_type = c3.selectbox(
+                "Reference session type", ["vo2max", "threshold"], key="cr_type",
+                format_func=lambda x: "VO₂max intervals" if x == "vo2max" else "Threshold")
+            b_pace = c4.text_input("Pace in cool conditions (m:ss /km)", "4:00",
+                                   key="cr_pace")
+            lt = st.slider("Threshold ÷ VO₂max velocity ratio", 0.82, 0.95,
+                           phys.DEFAULT_LT_FRACTION, 0.005, key="cr_lt",
+                           help="~0.90 is typical; the app refines it from your data.")
+            ok = st.form_submit_button("Create profile & log in", type="primary")
+        if ok:
+            if not name.strip():
+                st.error("Please choose a profile name.")
+            elif len(pw1) < 4:
+                st.error("Use a password of at least 4 characters.")
+            elif pw1 != pw2:
+                st.error("The two passwords don't match.")
+            elif storage.get_user_by_name(name) is not None:
+                st.error("That name is taken — pick another.")
+            else:
+                try:
+                    pace_sec = phys.parse_pace(b_pace)
+                except (ValueError, ZeroDivisionError):
+                    st.error("Pace must look like 4:00 or 3:45.")
+                else:
+                    uid = storage.create_user(name, pw1, pace_sec, b_type, lt)
+                    st.session_state.auth_uid = uid
+                    st.rerun()
+
+
+if "auth_uid" not in st.session_state:
+    st.session_state.auth_uid = None
+
+if st.session_state.auth_uid is None:
+    login_screen()
     st.stop()
 
-user = names[choice]
+user = storage.get_user(st.session_state.auth_uid)
+if user is None:                      # profile was deleted -> log out
+    st.session_state.auth_uid = None
+    st.rerun()
+
 fit, sessions = fit_for_user(user)
 
+# Sidebar: who's logged in + log out (no list of other profiles).
+st.sidebar.title("🏃 Pace Predictor")
+st.sidebar.markdown(f"Signed in as **{user['name']}**")
 st.sidebar.caption(
     f"Baseline: **{phys.format_pace(user['baseline_pace'])}/km** "
     f"({'VO₂max' if user['baseline_type'] == 'vo2max' else 'threshold'}, cool)  \n"
     f"Sessions logged: **{len(sessions)}**"
 )
+if st.sidebar.button("Log out"):
+    st.session_state.auth_uid = None
+    st.rerun()
 
 # --------------------------------------------------------------------------
 # Main tabs

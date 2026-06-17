@@ -23,18 +23,20 @@ python3 -m venv .venv
 
 ## How to use it
 
-1. **Create a profile** (sidebar). Give one pace you can hold in *cool*
-   conditions (~10–12 °C) for either session type — that's your starting
-   fitness. Friends just add their own profile; each person's heat response and
-   fitness are learned separately.
-2. **Log session** after each interval workout: date, type, average pace, and
-   the weather (temperature, sky, rain, humidity).
-3. **Predict**: pick a day, enter the weather, and read off the two paces with a
-   likely range, plus a pace-vs-temperature curve.
+1. **Create a profile**: pick a name + password and give one pace you can hold
+   in *cool* conditions (~10–12 °C) for either session type — that's your
+   starting fitness. Next time you **log in** by name + password. Profiles are
+   private and not listed; each person's heat response and fitness are learned
+   separately.
+2. **Log session** after each interval workout: date, time, type, average pace,
+   and the weather (temperature, sky, rain, humidity).
+3. **Predict**: pick a day + time, enter the weather, and read off the two paces
+   with a likely range, plus a pace-vs-temperature curve.
 4. **Insights**: see your fitness trend (with the weather effect removed) and
    your personal heat sensitivity.
 
-Data lives in a local `pace.db` (SQLite). Nothing leaves your machine.
+Passwords are stored only as salted **PBKDF2-HMAC-SHA256** hashes. Data lives in
+SQLite locally, or Postgres when `DATABASE_URL` is set (deployment).
 
 ## The model (short version)
 
