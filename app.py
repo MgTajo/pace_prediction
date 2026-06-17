@@ -123,6 +123,11 @@ def fit_for_user(user):
     return get_fit(sig, sessions), sessions
 
 
+def type_label(t: str) -> str:
+    """Display name for a session type."""
+    return "VO₂max" if t == "vo2max" else "Threshold"
+
+
 def pace_card(container, kind, title, p):
     cls = "vo2" if kind == "vo2max" else "thr"
     container.markdown(
@@ -151,6 +156,11 @@ INCORRECT = "Incorrect profile name or password."
 
 def login_screen():
     st.title("🏃 Pace Predictor")
+    st.markdown(
+        "Know the pace to aim for in any weather. Log your interval sessions and "
+        "the app learns how heat slows you down — then predicts your "
+        "**threshold** and **VO₂max** pace for the conditions on the day."
+    )
     tab_login, tab_create = st.tabs(["Log in", "Create profile"])
 
     with tab_login:
@@ -264,24 +274,21 @@ def weather_inputs(key: str, default_temp=15.0):
 with tab_predict:
     st.subheader("What should I run today?")
     st.markdown(
-        "Enter the day and the weather you expect, and this tells you the "
-        "**threshold** and **VO₂max interval** pace to aim for — adjusted for "
-        "the heat. The more sessions you log, the more the heat response is "
-        "tuned to you. Tap the **(?)** next to any field for what it does."
+        "Enter the day and the weather you expect to get the **threshold** and "
+        "**VO₂max interval** pace to aim for, adjusted for the heat."
     )
 
     if not sessions:
-        st.info("👋 No sessions yet. Head to **➕ Log session** and add your most "
-                "recent interval workout — the model takes its starting point "
-                "from it, then you can come back here to predict.")
+        st.info("👋 No sessions yet. Head to **➕ Log session** and add a recent "
+                "interval workout — that's where the model gets its starting "
+                "point. Then come back here to predict.")
     else:
         cda, cti = st.columns(2)
         d = cda.date_input("Day", value=date.today(),
-                           help="The day you'll run. Only matters via the sun's "
-                                "seasonal height, which feeds the radiant-heat term.")
+                           help="The date you'll run — sets the sun's seasonal height.")
         t = cti.time_input("Time of day", value=dtime(18, 0), step=1800,
-                           help="Used for the sun's height → radiant heat "
-                                "(Stuttgart). Noon sun loads more than evening sun.")
+                           help="When you'll start. Midday sun adds more heat than "
+                                "evening sun at the same temperature.")
         w = weather_inputs("pred", default_temp=15.0)
         w.date, w.time = d, t
 
@@ -290,20 +297,17 @@ with tab_predict:
         pace_card(left, "vo2max", "VO₂max interval pace", pred["vo2max"])
         pace_card(right, "threshold", "Threshold pace", pred["threshold"])
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Effective temperature", f"{pred['effective_temp']:.0f} °C",
-                  help="Raw temperature adjusted for sun, humidity and rain.")
-        m2.metric("Heat slowdown vs ideal", f"{pred['heat_slowdown_pct']:.1f} %",
+        m1, m2 = st.columns(2)
+        m1.metric("Feels like", f"{pred['effective_temp']:.0f} °C",
+                  help="Air temperature adjusted for sun, humidity and rain — the "
+                       "heat your body effectively runs in.")
+        m2.metric("Heat slowdown", f"{pred['heat_slowdown_pct']:.1f} %",
                   help="How much slower than ideal (~12 °C) conditions, at "
                        "today's fitness.")
-        m3.metric("Data personalisation",
-                  "prior only" if len(sessions) < 4 else f"{len(sessions)} sessions",
-                  help="Below ~4 sessions the heat response mostly uses typical "
-                       "physiology; more sessions tune it to you.")
 
         if len(sessions) < 4:
-            st.info("Still mostly using typical physiology. Log a handful of "
-                    "sessions and the heat response personalises to you.")
+            st.info("These early predictions lean on typical physiology. Log a few "
+                    "more sessions and the heat response tunes to you.")
 
         # Pace-vs-temperature curve at today's fitness.
         temps = np.arange(0, 35.25, 0.5)
@@ -350,11 +354,10 @@ with tab_predict:
             text=alt.condition(hover, "Pace:N", alt.value("")))
 
         chart = (ref + lines + selectors + hl_rule + hl_pts + hl_txt).properties(
-            height=340, title="Predicted pace across temperatures (at today's fitness)")
+            height=340, title="Predicted pace across temperatures")
         st.altair_chart(chart, width="stretch")
-        st.caption("Hover to read off both paces at any temperature. Uses today's "
-                   "sky/rain/humidity; dashed line = the temperature you entered. "
-                   "Higher on the chart = faster.")
+        st.caption("Hover to read both paces at any temperature. Dashed line = the "
+                   "temperature you entered; higher on the chart = faster.")
 
 
 # ======================  LOG SESSION  =====================================
@@ -368,11 +371,11 @@ with tab_log:
     sd = c1.date_input("Date", value=date.today(), key="log_date",
                        help="The day you ran this session.")
     stime = c2.time_input("Time", value=dtime(18, 0), step=1800, key="log_time",
-                          help="Start time of the session. Feeds the sun's "
-                               "height → radiant-heat load (Stuttgart).")
+                          help="When you started — midday sun adds more heat than "
+                               "an evening run at the same temperature.")
     c3, c4 = st.columns(2)
     stype = c3.selectbox("Type", ["vo2max", "threshold"],
-                         format_func=lambda x: "VO₂max" if x == "vo2max" else "Threshold",
+                         format_func=type_label,
                          key="log_type",
                          help="VO₂max = short, hard intervals (~3–5 min). "
                               "Threshold = longer, controlled efforts. Either "
@@ -396,8 +399,8 @@ with tab_log:
             st.session_state.pop("log_pace", None)
             st.session_state.pop("log_notes", None)
             st.session_state["log_saved_msg"] = (
-                f"Saved {('VO₂max' if stype == 'vo2max' else 'threshold')} "
-                f"session at {phys.format_pace(pace_sec)}/km.")
+                f"Saved {type_label(stype)} session at "
+                f"{phys.format_pace(pace_sec)}/km.")
             st.rerun()
         except (ValueError, ZeroDivisionError):
             st.error("Enter the pace as m:ss, e.g. 3:45.")
@@ -409,10 +412,11 @@ with tab_log:
     st.markdown("##### Recent sessions")
     if sessions:
         df = pd.DataFrame([{
-            "Date": s["date"], "Time": s["time"] or "—", "Type": s["session_type"],
+            "Date": s["date"], "Time": s["time"] or "—",
+            "Type": type_label(s["session_type"]),
             "Pace": phys.format_pace(s["pace_sec"]),
             "°C": s["temp_c"], "Sky": s["sky"], "Rain": s["rain"],
-            "RH%": int(s["humidity"]), "Notes": s["notes"], "_id": s["id"],
+            "Humidity %": int(s["humidity"]), "Notes": s["notes"], "_id": s["id"],
         } for s in reversed(sessions)])
         st.dataframe(df.drop(columns="_id"), width='stretch', hide_index=True)
 
@@ -422,7 +426,7 @@ with tab_log:
                        "add it below so the sun/radiation effect applies to them.")
 
         def _label(s):
-            return (f"{s['date']} · {s['session_type']} · "
+            return (f"{s['date']} · {type_label(s['session_type'])} · "
                     f"{phys.format_pace(s['pace_sec'])} · "
                     f"{s['time'] or 'no time'} (#{s['id']})")
 
@@ -440,8 +444,7 @@ with tab_log:
             etype = e3.selectbox(
                 "Type", ["vo2max", "threshold"],
                 index=0 if s["session_type"] == "vo2max" else 1,
-                format_func=lambda x: "VO₂max" if x == "vo2max" else "Threshold",
-                key=f"ed_type_{sid}")
+                format_func=type_label, key=f"ed_type_{sid}")
             epace = e4.text_input("Pace (m:ss /km)", key=f"ed_pace_{sid}",
                                   value=phys.format_pace(s["pace_sec"]))
             w1, w2, w3, w4 = st.columns(4)
@@ -481,7 +484,7 @@ with tab_log:
 
 # ======================  INSIGHTS  ========================================
 with tab_insights:
-    st.subheader("Your model")
+    st.subheader("Your fitness & heat response")
     if len(sessions) < 2:
         st.info("Log at least a couple of sessions to see your fitness trend and "
                 "heat response.")
@@ -494,8 +497,9 @@ with tab_insights:
         k2.metric("Slowdown at 25 °C", f"{M.heat_sensitivity_at(fit, 25):.1f} %",
                   help="Your estimated pace loss at 25 °C versus ideal "
                        "(~12 °C) conditions.")
-        k3.metric("Session noise (±1σ)", f"{100*(np.exp(fit.sigma)-1):.1f} %",
-                  help="Run-to-run scatter the model can't explain by weather/fitness.")
+        k3.metric("Run-to-run variation", f"±{100*(np.exp(fit.sigma)-1):.1f} %",
+                  help="Typical scatter between sessions that the model can't "
+                       "explain by weather or fitness.")
 
         # Fitness trajectory (ideal-conditions vVO2max pace) + normalized points.
         days, pace, lo, hi = M.fitness_trajectory(fit)
@@ -507,8 +511,7 @@ with tab_insights:
         pts = pd.DataFrame({
             "Date": [base + timedelta(days=int(x)) for x in ndays],
             "pace": npace,
-            "Type": [("VO₂max" if s["session_type"] == "vo2max" else "Threshold-adj")
-                     for s in sessions]})
+            "Type": [type_label(s["session_type"]) for s in sessions]})
 
         band = alt.Chart(traj).mark_area(opacity=0.18, color="#ff3d77").encode(
             x="Date:T",
@@ -522,7 +525,7 @@ with tab_insights:
             x="Date:T",
             y=alt.Y("pace:Q", scale=alt.Scale(reverse=True, zero=False)),
             color=alt.Color("Type:N", scale=alt.Scale(
-                domain=["VO₂max", "Threshold-adj"], range=["#ff3d77", "#2b6cff"])),
+                domain=["VO₂max", "Threshold"], range=["#ff3d77", "#2b6cff"])),
             tooltip=["Date:T", "Type:N"])
         st.altair_chart((band + fline + scat).properties(
             height=340, title="Fitness over time (weather removed)"),
@@ -534,11 +537,11 @@ with tab_insights:
 
 # ======================  PROFILE  =========================================
 with tab_profile:
-    st.subheader("Profile settings")
+    st.subheader("Account")
     st.markdown(f"Signed in as **{user['name']}**.")
-    st.caption(f"Sessions logged: **{len(sessions)}**. There's nothing to "
-               "configure — the model learns your fitness, heat response and "
-               "threshold↔VO₂max link directly from the sessions you log.")
+    st.caption(f"Sessions logged: **{len(sessions)}**. Nothing to set up here — "
+               "the model learns your fitness and heat response directly from "
+               "the sessions you log.")
 
     st.divider()
     with st.expander("Danger zone"):
