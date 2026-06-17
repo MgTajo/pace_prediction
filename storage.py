@@ -21,6 +21,7 @@ from pathlib import Path
 from sqlalchemy import (Column, Float, ForeignKey, Integer, MetaData, Table,
                         Text, create_engine, delete, inspect, insert, select,
                         text, update)
+from sqlalchemy.exc import SQLAlchemyError
 
 import physiology as phys
 
@@ -76,12 +77,24 @@ def _get_engine():
 
 def init_db():
     eng = _get_engine()
-    metadata.create_all(eng)  # checkfirst=True -> safe on existing databases
+    try:
+        metadata.create_all(eng)  # checkfirst=True -> safe on existing databases
+    except SQLAlchemyError as e:
+        # Streamlit redacts the in-app message; print the real DB error to the
+        # (un-redacted) server logs so the root cause is visible.
+        orig = str(getattr(e, "orig", e)).lower()
+        print(f"[init_db] create_all failed: {getattr(e, 'orig', e)!r}", flush=True)
+        # Tables already existing is harmless; anything else is a real problem.
+        if "already exists" not in orig and "duplicate" not in orig:
+            raise
     # Migration: add time_of_day to databases created before that column.
-    cols = {c["name"] for c in inspect(eng).get_columns("sessions")}
-    if "time_of_day" not in cols:
-        with eng.begin() as con:
-            con.execute(text("ALTER TABLE sessions ADD COLUMN time_of_day TEXT"))
+    try:
+        cols = {c["name"] for c in inspect(eng).get_columns("sessions")}
+        if "time_of_day" not in cols:
+            with eng.begin() as con:
+                con.execute(text("ALTER TABLE sessions ADD COLUMN time_of_day TEXT"))
+    except SQLAlchemyError as e:
+        print(f"[init_db] migration skipped: {getattr(e, 'orig', e)!r}", flush=True)
 
 
 def _rows(result) -> list[dict]:
