@@ -542,10 +542,29 @@ with tab_insights:
 # ======================  PROFILE  =========================================
 with tab_profile:
     st.subheader("Account")
-    st.markdown(f"Signed in as **{user['name']}** · 📍 {user_loc.name}")
-    st.caption(f"Sessions logged: **{len(sessions)}**. Nothing to set up here — "
-               "the model learns your fitness and heat response directly from "
-               "the sessions you log.")
+    st.markdown(f"Signed in as **{user['name']}**")
+    st.caption(f"Sessions logged: **{len(sessions)}**.")
+
+    st.markdown("##### Location")
+    cur_idx = next((i for i, c in enumerate(phys.CITIES)
+                    if c.name == user_loc.name), 0)
+    with st.form("edit_location"):
+        new_loc = st.selectbox(
+            "Closest city", phys.CITIES, index=cur_idx,
+            format_func=lambda c: c.name,
+            help="Used only for the sun's position (how much radiant heat a "
+                 "daytime run adds). Changing it re-reads all your sessions "
+                 "with the new sun geometry.")
+        saved = st.form_submit_button("Save location", type="primary")
+    if saved:
+        if new_loc.name == user_loc.name:
+            st.info("That's already your location.")
+        else:
+            storage.update_user_location(user["id"], new_loc.name, new_loc.lat,
+                                         new_loc.lon, new_loc.tz)
+            invalidate_data()
+            st.success(f"Location set to {new_loc.name}.")
+            st.rerun()
 
     st.divider()
     with st.expander("Danger zone"):

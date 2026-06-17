@@ -188,6 +188,13 @@ def set_user_password(user_id: int, password: str):
             pw_salt=salt, pw_hash=h))
 
 
+def update_user_location(user_id: int, city: str, lat: float, lon: float,
+                         tz: str):
+    with _get_engine().begin() as con:
+        con.execute(update(users).where(users.c.id == user_id).values(
+            city=city, lat=lat, lon=lon, tz=tz))
+
+
 def delete_user(user_id: int):
     # Explicit cascade (portable; doesn't rely on FK enforcement settings).
     with _get_engine().begin() as con:
