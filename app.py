@@ -6,6 +6,7 @@ Run with:  streamlit run app.py
 
 from __future__ import annotations
 
+import os
 from datetime import date, time as dtime, timedelta
 
 import altair as alt
@@ -22,6 +23,15 @@ import storage
 # --------------------------------------------------------------------------
 
 st.set_page_config(page_title="Pace Predictor", page_icon="🏃", layout="wide")
+
+# Use the managed Postgres database in the cloud (set as a Streamlit secret);
+# fall back to a local SQLite file when running offline.
+try:
+    if "DATABASE_URL" in st.secrets:
+        os.environ.setdefault("DATABASE_URL", str(st.secrets["DATABASE_URL"]))
+except Exception:
+    pass
+
 storage.init_db()
 
 st.markdown(
