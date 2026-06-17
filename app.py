@@ -32,7 +32,15 @@ try:
 except Exception:
     pass
 
-storage.init_db()
+@st.cache_resource(show_spinner=False)
+def _init_db_once():
+    # Schema creation + migrations only need to run once per server process,
+    # not on every script rerun. cache_resource is shared across all sessions.
+    storage.init_db()
+    return True
+
+
+_init_db_once()
 
 st.markdown(
     """
@@ -76,6 +84,27 @@ PACE_LABEL = (
 # Model fit (cached on a signature of the user's data)
 # --------------------------------------------------------------------------
 
+# DB reads are cached so the common case -- a rerun triggered by fiddling with
+# a widget (slider, text field) -- costs zero round-trips to the (remote)
+# database. The caches are cleared explicitly whenever data is mutated.
+
+@st.cache_data(show_spinner=False)
+def load_user(uid):
+    return storage.get_user(uid)
+
+
+@st.cache_data(show_spinner=False)
+def load_sessions(uid):
+    return storage.list_sessions(uid)
+
+
+def invalidate_data():
+    """Drop the cached user/session reads after a write so the next rerun
+    re-queries (and the model re-fits off the new data)."""
+    load_user.clear()
+    load_sessions.clear()
+
+
 @st.cache_data(show_spinner=False)
 def get_fit(user_sig, sessions):
     # The model anchors itself from the sessions -- no user baseline needed.
@@ -84,7 +113,7 @@ def get_fit(user_sig, sessions):
 
 
 def fit_for_user(user):
-    sessions = storage.list_sessions(user["id"])
+    sessions = load_sessions(user["id"])
     # Signature covers pace/weather/time of every session so any edit
     # invalidates the cache.
     sig = (user["id"], len(sessions),
@@ -177,8 +206,9 @@ if st.session_state.auth_uid is None:
     login_screen()
     st.stop()
 
-user = storage.get_user(st.session_state.auth_uid)
+user = load_user(st.session_state.auth_uid)
 if user is None:                      # profile was deleted -> log out
+    invalidate_data()
     st.session_state.auth_uid = None
     st.rerun()
 
@@ -360,6 +390,7 @@ with tab_log:
             storage.add_session(user["id"], sd, stype, pace_sec, lw.temp_c,
                                 lw.sky, lw.rain, lw.humidity,
                                 time_of_day=stime.strftime("%H:%M"), notes=notes)
+            invalidate_data()
             # Clear the typed fields so the empty form confirms the save,
             # then rerun and show the confirmation once.
             st.session_state.pop("log_pace", None)
@@ -430,6 +461,7 @@ with tab_log:
                     storage.update_session(sid, ed, etype, phys.parse_pace(epace),
                                            etemp, esky, erain, ehum,
                                            et.strftime("%H:%M"), enotes)
+                    invalidate_data()
                     st.session_state.pop("edit_pick", None)  # label may have changed
                     st.session_state["log_saved_msg"] = f"Updated the {ed} session."
                     st.rerun()
@@ -441,6 +473,7 @@ with tab_log:
                                   key="del_pick")
             if to_del != "—" and st.button("Delete selected", type="secondary"):
                 storage.delete_session(by_label[to_del]["id"])
+                invalidate_data()
                 st.rerun()
     else:
         st.caption("No sessions yet.")
@@ -512,5 +545,6 @@ with tab_profile:
         st.write(f"Delete **{user['name']}** and all their sessions.")
         if st.button("Delete this profile", type="secondary"):
             storage.delete_user(user["id"])
+            invalidate_data()
             st.session_state.auth_uid = None
             st.rerun()
