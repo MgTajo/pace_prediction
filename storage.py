@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import os
 from datetime import date, datetime
 from pathlib import Path
@@ -37,9 +36,11 @@ users = Table(
     Column("id", Integer, primary_key=True),
     Column("name", Text, unique=True, nullable=False),
     Column("created", Text, nullable=False),
-    Column("baseline_pace", Float, nullable=False),   # sec/km in cool conditions
-    Column("baseline_type", Text, nullable=False),    # 'vo2max' | 'threshold'
-    Column("lt_fraction", Float, nullable=False),
+    # Legacy/vestigial: the model no longer uses a user baseline (it anchors
+    # itself from the logged sessions), so these are nullable and unused.
+    Column("baseline_pace", Float),                   # sec/km in cool conditions
+    Column("baseline_type", Text),                    # 'vo2max' | 'threshold'
+    Column("lt_fraction", Float),
     Column("pw_salt", Text),                          # per-user password salt
     Column("pw_hash", Text),                          # PBKDF2-HMAC-SHA256 hash
 )
@@ -149,16 +150,23 @@ def get_user_by_name(name: str) -> dict | None:
         return dict(r._mapping) if r else None
 
 
-def create_user(name: str, password: str, baseline_pace: float,
-                baseline_type: str,
-                lt_fraction: float = phys.DEFAULT_LT_FRACTION) -> int:
+def create_user(name: str, password: str) -> int:
+    """Create a profile from just a name + password. No baseline is asked for;
+    the model anchors itself from the sessions the user logs later.
+
+    The baseline_* columns are vestigial (the model ignores them), but older
+    databases were created with a NOT NULL constraint on them, so we write
+    harmless placeholder values to stay compatible with both old and new
+    schemas without a table rebuild.
+    """
     salt, h = _hash_password(password)
     with _get_engine().begin() as con:
         res = con.execute(insert(users).values(
             name=name.strip(),
             created=datetime.now().isoformat(timespec="seconds"),
-            baseline_pace=baseline_pace, baseline_type=baseline_type,
-            lt_fraction=lt_fraction, pw_salt=salt, pw_hash=h))
+            baseline_pace=240.0, baseline_type="vo2max",
+            lt_fraction=phys.DEFAULT_LT_FRACTION,
+            pw_salt=salt, pw_hash=h))
         return int(res.inserted_primary_key[0])
 
 
@@ -167,14 +175,6 @@ def set_user_password(user_id: int, password: str):
     with _get_engine().begin() as con:
         con.execute(update(users).where(users.c.id == user_id).values(
             pw_salt=salt, pw_hash=h))
-
-
-def update_user(user_id: int, baseline_pace: float, baseline_type: str,
-                lt_fraction: float):
-    with _get_engine().begin() as con:
-        con.execute(update(users).where(users.c.id == user_id).values(
-            baseline_pace=baseline_pace, baseline_type=baseline_type,
-            lt_fraction=lt_fraction))
 
 
 def delete_user(user_id: int):
@@ -235,52 +235,3 @@ def list_sessions(user_id: int) -> list[dict]:
 def delete_session(session_id: int):
     with _get_engine().begin() as con:
         con.execute(delete(sessions).where(sessions.c.id == session_id))
-
-
-# ---- export / import (move data between laptop and cloud) ----------------
-
-def export_json(user: dict, session_list: list[dict]) -> str:
-    """Serialize a profile's sessions to a portable JSON string."""
-    return json.dumps({
-        "app": "pace-predictor", "version": 1,
-        "profile": user["name"],
-        "baseline_pace": user["baseline_pace"],
-        "baseline_type": user["baseline_type"],
-        "lt_fraction": user["lt_fraction"],
-        "exported_at": date.today().isoformat(),
-        "sessions": [{
-            "date": s["date"].isoformat(), "session_type": s["session_type"],
-            "pace_sec": s["pace_sec"], "temp_c": s["temp_c"], "sky": s["sky"],
-            "rain": s["rain"], "humidity": s["humidity"], "time": s["time"],
-            "notes": s["notes"],
-        } for s in session_list],
-    }, indent=2)
-
-
-def _session_key(date_iso: str, stype: str, pace_sec, tod) -> tuple:
-    return (date_iso, stype, round(float(pace_sec), 2), tod or "")
-
-
-def import_json(user_id: int, payload: dict, existing: list[dict]) -> tuple[int, int]:
-    """Append a payload's sessions to a profile, skipping duplicates of what's
-    already there. Returns (added, skipped)."""
-    seen = {_session_key(s["date"].isoformat(), s["session_type"],
-                         s["pace_sec"], s["time"]) for s in existing}
-    added = skipped = 0
-    for s in payload.get("sessions", []):
-        try:
-            key = _session_key(s["date"], s["session_type"], s["pace_sec"],
-                               s.get("time"))
-            if key in seen:
-                skipped += 1
-                continue
-            add_session(user_id, date.fromisoformat(s["date"]),
-                        s["session_type"], float(s["pace_sec"]),
-                        float(s["temp_c"]), s["sky"], s["rain"],
-                        float(s["humidity"]), time_of_day=s.get("time"),
-                        notes=s.get("notes", ""))
-            seen.add(key)
-            added += 1
-        except (KeyError, ValueError, TypeError):
-            skipped += 1
-    return added, skipped
