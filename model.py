@@ -35,8 +35,18 @@ Bayesian linear regression.  That means:
 
 Two noise scales (sigma, tau) are fit by empirical Bayes (maximising the
 marginal likelihood); the weather coefficients, the threshold offset and the
-fitness level all get informative priors so a brand-new user starts from
-physiologically sane defaults and personalises as data arrives.
+fitness level all get informative priors so the model personalises as data
+arrives.
+
+NO USER BASELINE
+----------------
+The user is never asked for a cool-conditions reference pace.  The fitness
+anchor is read straight off the logged sessions: each session is
+weather-corrected to ideal-conditions vVO2max with the *prior* heat
+coefficients (and the prior threshold offset), and their mean seeds the
+fitness prior (see `config_from_sessions`).  The anchor is loose (sd ~12%) and
+session noise is tight (~1.5%), so a single logged session already pins the
+fitness; the anchor only keeps the prior proper and sane for extrapolation.
 """
 
 from __future__ import annotations
@@ -53,6 +63,12 @@ import physiology as phys
 # --------------------------------------------------------------------------
 # Configuration / priors  (all in log-velocity units; 0.01 ~ 1%)
 # --------------------------------------------------------------------------
+
+# Fallback fitness anchor used only before any session is logged: a typical
+# recreational vVO2max pace (~4:00/km).  Once even one session exists the anchor
+# is derived from the data (`config_from_sessions`), so this barely matters.
+DEFAULT_BASELINE_PACE_SEC = 240.0
+
 
 @dataclass
 class ModelConfig:
@@ -86,22 +102,38 @@ class ModelConfig:
 _B1, _B2, _BR = -3, -2, -1
 
 
-def config_from_baseline(baseline_pace_sec: float, baseline_type: str,
+def config_from_sessions(sessions: list[dict],
                          lt_fraction: float = phys.DEFAULT_LT_FRACTION,
                          **overrides) -> ModelConfig:
-    """Build a ModelConfig from a user's cool-conditions reference pace.
+    """Build a ModelConfig whose fitness anchor is read off the sessions.
 
-    The baseline is anchored as vVO2max in ideal conditions.  If the user gave
-    a *threshold* reference, divide its velocity by the LT fraction to recover
-    the implied vVO2max.  The personal LT fraction also seeds the threshold
-    offset prior `betar_mean`.
+    There is no user-supplied baseline: instead we weather-correct every logged
+    session back to ideal-conditions vVO2max log-velocity using the *prior*
+    heat coefficients (and the prior threshold offset for threshold sessions),
+    and anchor the fitness prior at their mean.  With no sessions yet we fall
+    back to a generic recreational pace so the prior stays proper.
+
+    `lt_fraction` only seeds the threshold-offset prior `betar_mean`; the offset
+    itself is re-estimated from the data (the `beta_r` parameter).
     """
-    v = phys.pace_to_velocity(baseline_pace_sec)
-    if baseline_type == "threshold":
-        v = v / lt_fraction
+    betar_mean = float(np.log(lt_fraction))
+    if not sessions:
+        baseline_logv = phys.pace_to_logv(DEFAULT_BASELINE_PACE_SEC)
+    else:
+        # Use the default priors purely to undo weather here; the fit refines them.
+        b1, b2 = ModelConfig.beta1_mean, ModelConfig.beta2_mean
+        vals = []
+        for s in sessions:
+            w = phys.Weather.from_row(s)
+            p1, p2 = phys.heat_penalty_basis(w)
+            ideal = phys.pace_to_logv(s["pace_sec"]) - (b1 * p1 + b2 * p2)
+            if s["session_type"] == "threshold":
+                ideal -= betar_mean
+            vals.append(ideal)
+        baseline_logv = float(np.mean(vals))
     return ModelConfig(
-        baseline_logv=float(np.log(v)),
-        betar_mean=float(np.log(lt_fraction)),
+        baseline_logv=baseline_logv,
+        betar_mean=betar_mean,
         **overrides,
     )
 

@@ -23,13 +23,12 @@ python3 -m venv .venv
 
 ## How to use it
 
-1. **Create a profile**: pick a name + password and give one pace you can hold
-   in *cool* conditions (~10–12 °C) for either session type — that's your
-   starting fitness. Next time you **log in** by name + password. Profiles are
-   private and not listed; each person's heat response and fitness are learned
-   separately.
+1. **Create a profile**: just pick a name + password — no fitness numbers
+   needed. Next time you **log in** by name + password. Profiles are private and
+   not listed; each person's heat response and fitness are learned separately.
 2. **Log session** after each interval workout: date, time, type, average pace,
-   and the weather (temperature, sky, rain, humidity).
+   and the weather (temperature, sky, rain, humidity). Your very first session
+   is what the model takes its starting point from — log one before predicting.
 3. **Predict**: pick a day + time, enter the weather, and read off the two paces
    with a likely range, plus a pace-vs-temperature curve.
 4. **Insights**: see your fitness trend (with the weather effect removed) and
@@ -54,7 +53,9 @@ log v  =  fitness(date)                # slow latent random walk
   calendar time). It's there only to stop slow seasonal fitness gains from being
   mistaken for a weather effect — you don't predict it, but ignoring it would
   bias everything. Because it's constrained to change slowly, the model can
-  separate it from the *fast* day-to-day weather swings.
+  separate it from the *fast* day-to-day weather swings. Its starting level is
+  read straight off your logged sessions (weather-corrected back to ideal
+  conditions) — you're never asked for a baseline pace.
 * **One latent fitness drives both paces** through a fixed physiological ratio
   (vLT ≈ 0.90·vVO₂max, refined from your data), so threshold-only logging still
   yields a VO₂max prediction.

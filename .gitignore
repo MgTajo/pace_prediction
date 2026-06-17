@@ -9,6 +9,9 @@ pace.db
 *.db
 .streamlit/secrets.toml
 
+# Local-only notes
+HANDOVER.md
+
 # OS / editor
 .DS_Store
 .idea/
