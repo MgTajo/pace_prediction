@@ -6,6 +6,7 @@ Run with:  streamlit run app.py
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import date, time as dtime, timedelta
 
@@ -469,6 +470,38 @@ with tab_profile:
             st.rerun()
         except ValueError:
             st.error("Pace must look like 4:00.")
+
+    st.divider()
+    st.markdown("##### Backup / transfer data")
+    st.caption("Move sessions between your laptop and the online app. Export "
+               "from one, import into the profile you're logged into on the other.")
+    cexp, cimp = st.columns(2)
+    cexp.download_button(
+        "⬇️ Export my sessions (JSON)",
+        data=storage.export_json(user, sessions),
+        file_name=f"{user['name']}_pace_export.json",
+        mime="application/json",
+        disabled=not sessions)
+
+    up = cimp.file_uploader("⬆️ Import from a JSON export", type="json",
+                            key="import_file")
+    if up is not None:
+        try:
+            payload = json.loads(up.getvalue())
+            if not isinstance(payload, dict) or not isinstance(
+                    payload.get("sessions"), list):
+                raise ValueError
+        except (ValueError, TypeError):
+            st.error("That doesn't look like a valid export file.")
+        else:
+            st.info(f"File has {len(payload['sessions'])} session(s) from "
+                    f"profile “{payload.get('profile', '?')}”. They'll be added "
+                    "to **" + user["name"] + "**; duplicates are skipped.")
+            if st.button("Import into this profile", type="primary", key="do_import"):
+                added, skipped = storage.import_json(user["id"], payload, sessions)
+                st.success(f"Imported {added} session(s); "
+                           f"skipped {skipped} duplicate(s).")
+                st.rerun()
 
     st.divider()
     with st.expander("Danger zone"):

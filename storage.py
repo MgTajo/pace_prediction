@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 from datetime import date, datetime
 from pathlib import Path
@@ -234,3 +235,52 @@ def list_sessions(user_id: int) -> list[dict]:
 def delete_session(session_id: int):
     with _get_engine().begin() as con:
         con.execute(delete(sessions).where(sessions.c.id == session_id))
+
+
+# ---- export / import (move data between laptop and cloud) ----------------
+
+def export_json(user: dict, session_list: list[dict]) -> str:
+    """Serialize a profile's sessions to a portable JSON string."""
+    return json.dumps({
+        "app": "pace-predictor", "version": 1,
+        "profile": user["name"],
+        "baseline_pace": user["baseline_pace"],
+        "baseline_type": user["baseline_type"],
+        "lt_fraction": user["lt_fraction"],
+        "exported_at": date.today().isoformat(),
+        "sessions": [{
+            "date": s["date"].isoformat(), "session_type": s["session_type"],
+            "pace_sec": s["pace_sec"], "temp_c": s["temp_c"], "sky": s["sky"],
+            "rain": s["rain"], "humidity": s["humidity"], "time": s["time"],
+            "notes": s["notes"],
+        } for s in session_list],
+    }, indent=2)
+
+
+def _session_key(date_iso: str, stype: str, pace_sec, tod) -> tuple:
+    return (date_iso, stype, round(float(pace_sec), 2), tod or "")
+
+
+def import_json(user_id: int, payload: dict, existing: list[dict]) -> tuple[int, int]:
+    """Append a payload's sessions to a profile, skipping duplicates of what's
+    already there. Returns (added, skipped)."""
+    seen = {_session_key(s["date"].isoformat(), s["session_type"],
+                         s["pace_sec"], s["time"]) for s in existing}
+    added = skipped = 0
+    for s in payload.get("sessions", []):
+        try:
+            key = _session_key(s["date"], s["session_type"], s["pace_sec"],
+                               s.get("time"))
+            if key in seen:
+                skipped += 1
+                continue
+            add_session(user_id, date.fromisoformat(s["date"]),
+                        s["session_type"], float(s["pace_sec"]),
+                        float(s["temp_c"]), s["sky"], s["rain"],
+                        float(s["humidity"]), time_of_day=s.get("time"),
+                        notes=s.get("notes", ""))
+            seen.add(key)
+            added += 1
+        except (KeyError, ValueError, TypeError):
+            skipped += 1
+    return added, skipped
